@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      FIREBIRD_URL: https://github.com/FirebirdSQL/firebird/releases/download/v5.0.3/Firebird-5.0.3.1683-0-linux-x64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet build -c Release
+      - name: Start Firebird 5
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libtommath1 libncurses6
+          mkdir -p "$RUNNER_TEMP/fb" "$RUNNER_TEMP/fbdata"
+          curl -sSL -o "$RUNNER_TEMP/fb.tar.gz" "$FIREBIRD_URL"
+          tar xzf "$RUNNER_TEMP/fb.tar.gz" -C "$RUNNER_TEMP/fb" --strip-components=1
+          tar xzf "$RUNNER_TEMP/fb/buildroot.tar.gz" -C "$RUNNER_TEMP/fb"
+          export FIREBIRD="$RUNNER_TEMP/fb/opt/firebird"
+          export LD_LIBRARY_PATH="$FIREBIRD/lib"
+          echo "RemoteServicePort = 3055" >> "$FIREBIRD/firebird.conf"
+          echo "create user SYSDBA password 'masterkey';" | "$FIREBIRD/bin/isql" -q -user SYSDBA security.db
+          nohup "$FIREBIRD/bin/firebird" > "$RUNNER_TEMP/fbdata/server.log" 2>&1 &
+          sleep 3
+          echo "FBTAB_TEST_DB=localhost/3055:$RUNNER_TEMP/fbdata/fbtab_test.fdb" >> "$GITHUB_ENV"
+          echo "FBTAB_TEST_PASSWORD=masterkey" >> "$GITHUB_ENV"
+          echo "FBTAB_TEST_FBCLIENT=$FIREBIRD/lib/libfbclient.so" >> "$GITHUB_ENV"
+          echo "FIREBIRD=$FIREBIRD" >> "$GITHUB_ENV"
+      - run: dotnet test -c Release --no-build
