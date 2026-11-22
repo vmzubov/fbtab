@@ -86,7 +86,11 @@ faster.
   `firebird.conf` next to fbclient (on Windows `zlib1.dll` has to be next to it as well). `--compress`
   then only checks: if the connection came out uncompressed, fbtab says so.
 
-The server has to allow it too, which Firebird 3 and later do by default. Whether a connection was
+Prefer fbclient over a distant link when the result has BLOB columns: without it every BLOB value
+costs two more requests to the server, while fbclient 5.0.3 or later gets small BLOBs together with
+the row from a server of 5.0.3 or later.
+
+The server has to allow compression too, which Firebird 3 and later do by default. Whether a connection was
 compressed is in the meta.json (`server.compressed`). On a fast local network compression only costs
 CPU: leave it off.
 

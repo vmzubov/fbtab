@@ -88,6 +88,8 @@ public sealed record ConnectionSettings(
     string? ClientLibrary = null,
     bool Compress = false)
 {
+    private const int MaxPacketSize = 32767;
+
     public bool Native => ClientLibrary is not null;
 
     public string BuildConnectionString()
@@ -121,6 +123,9 @@ public sealed record ConnectionSettings(
             // Through fbclient the driver has no way to ask for compression: there it is WireCompression in
             // the firebird.conf next to fbclient.
             builder.Compression = Compress;
+            // The driver makes the socket buffers this size (8192 by default), which caps the TCP window: over
+            // a link with a 90 ms round trip that is under 100 KB/s. 32767 is the most the driver takes.
+            builder.PacketSize = MaxPacketSize;
             builder.DataSource = Address.Host ?? "localhost";
             builder.Port = Address.Port;
             builder.Database = Address.Database;

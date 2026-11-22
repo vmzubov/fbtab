@@ -58,6 +58,15 @@ public class CommandLineTests
         Assert.Contains("compression=True", settings.BuildConnectionString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    // The driver sizes the socket buffers by the packet size; its default of 8192 caps the speed over a
+    // distant link.
+    [Fact]
+    public void ManagedConnectionAsksForTheLargestPacket()
+    {
+        var managed = new ConnectionSettings(DatabaseAddress.Parse("h:a"), "U", "p");
+        Assert.Contains("packet size=32767", managed.BuildConnectionString(), StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void UserComesFromIscUser()
     {
