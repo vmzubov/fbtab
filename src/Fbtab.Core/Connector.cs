@@ -46,12 +46,33 @@ public static class Connector
                 }
             }
 
+            AskForNativeTypes(connection);
             return connection;
         }
         catch
         {
             connection.Dispose();
             throw;
+        }
+    }
+
+    // Firebird 4+. A server can be set (DataTypeCompatibility) to hand the newer types to clients as older
+    // ones: BOOLEAN as CHAR(5), INT128 as BIGINT, DECFLOAT as DOUBLE PRECISION, values with a time zone
+    // without it. That is a default for clients that do not know the types; this one does, and the output
+    // must not depend on a server setting. Older servers have neither the statement nor the setting.
+    private static void AskForNativeTypes(FbConnection connection)
+    {
+        foreach (var type in new[] { "boolean", "int128", "decfloat", "time zone" })
+        {
+            try
+            {
+                using var command = new FbCommand($"set bind of {type} to native", connection);
+                command.ExecuteNonQuery();
+            }
+            catch (FbException)
+            {
+                return;
+            }
         }
     }
 

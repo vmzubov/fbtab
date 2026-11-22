@@ -39,8 +39,17 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
 {
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
+    // Rows asked from the server at once by the driver's own protocol (its default is 200). Over a slow link
+    // every request costs a round trip; the server still cuts a batch to what fits its buffer.
+    private const int FetchRows = 2000;
+
+    private bool _compressionWarned;
+
     /// <summary>Called from the reading thread about once a second: file name and rows written so far.</summary>
     public Action<string, long>? Progress { get; set; }
+
+    /// <summary>Something the user should know that is not an error.</summary>
+    public Action<string>? Warning { get; set; }
 
     public ExportOutcome ExportFile(string sqlPath, CancellationToken cancel = default)
     {
@@ -107,14 +116,14 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             {
                 // Every query is prepared before the first one runs, so a mistake in the last query of a
                 // file shows up at once and not after an hour of the first.
-                var nativeTypes = new List<string[]>();
+                var described = new List<IReadOnlyList<ColumnInfo>>();
                 using (var describing = connection.BeginTransaction(TransactionOptions(isolation)))
                 {
                     foreach (var query in queries)
                     {
                         try
                         {
-                            nativeTypes.Add(Describe(connection, describing, query.Text));
+                            described.Add(Describe(connection, describing, query.Text));
                         }
                         catch (FbException e)
                         {
@@ -128,18 +137,26 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
                     describing.Rollback();
                 }
 
-                TimeZonesAsText(connection);
+                WideTypesAsText(connection);
                 using var transaction = connection.BeginTransaction(TransactionOptions(isolation));
                 var server = ReadServerInfo(connection, transaction);
+                if (settings.Compress && server.Compressed == false && !_compressionWarned)
+                {
+                    _compressionWarned = true;
+                    Warning?.Invoke(settings.Native
+                        ? "the connection is not compressed: through fbclient compression is switched on by the line \"WireCompression = true\" in the firebird.conf next to fbclient"
+                        : "the connection is not compressed: the server did not agree to it");
+                }
+
                 for (var i = 0; i < queries.Count; i++)
                 {
                     cancel.ThrowIfCancellationRequested();
                     var baseName = i == 0 ? name : $"{name}_{i + 1}";
-                    using var command = new FbCommand(queries[i].Text, connection, transaction);
+                    using var command = new FbCommand(queries[i].Text, connection, transaction) { FetchSize = FetchRows };
                     running = command;
                     try
                     {
-                        var written = ExportQuery(command, queries[i], nativeTypes[i], baseName, isolation, server, cancel, r => Progress?.Invoke(name, rows + r));
+                        var written = ExportQuery(command, queries[i], described[i], baseName, isolation, server, cancel, r => Progress?.Invoke(name, rows + r));
                         if (written is { } w)
                         {
                             rows += w.Rows;
@@ -170,13 +187,18 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             {
                 return Result(IsConnectionLost(e) ? ExportStatus.ConnectionFailed : ExportStatus.Failed, e.SQLSTATE, e.Message);
             }
+            catch (Exception e) when (e is OverflowException or ArgumentException or InvalidCastException or FormatException or InvalidOperationException)
+            {
+                // The driver could not turn a value into a .NET one. The file stays as .part; the run goes on.
+                return Result(ExportStatus.Failed, message: "cannot read a value: " + e.Message);
+            }
         }
     }
 
     private (string Path, long Rows)? ExportQuery(
         FbCommand command,
         SqlStatement statement,
-        string[] nativeTypes,
+        IReadOnlyList<ColumnInfo> columns,
         string baseName,
         Isolation isolation,
         ServerInfo server,
@@ -191,7 +213,6 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
 
         var started = DateTime.UtcNow;
         long rows = 0;
-        IReadOnlyList<ColumnInfo> columns;
         using (var reader = command.ExecuteReader(CommandBehavior.SequentialAccess))
         {
             if (reader.FieldCount == 0)
@@ -199,7 +220,11 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
                 return null;
             }
 
-            columns = ReadColumns(reader, nativeTypes);
+            if (reader.FieldCount != columns.Count)
+            {
+                throw new InvalidOperationException("The query returned other columns than it was described with.");
+            }
+
             var types = columns.Select(c => c.Type).ToArray();
             var scales = columns.Select(c => c.Scale).ToArray();
 
@@ -246,8 +271,11 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
         return (tsvPath, rows);
     }
 
-    private static IReadOnlyList<ColumnInfo> ReadColumns(FbDataReader reader, string[] nativeTypes)
+    // The columns as the server describes them, without running the query.
+    private static IReadOnlyList<ColumnInfo> Describe(FbConnection connection, FbTransaction transaction, string sql)
     {
+        using var command = new FbCommand(sql, connection, transaction);
+        using var reader = command.ExecuteReader(CommandBehavior.SchemaOnly);
         DataTable? schema = null;
         try
         {
@@ -261,9 +289,7 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
         var columns = new List<ColumnInfo>(reader.FieldCount);
         for (var i = 0; i < reader.FieldCount; i++)
         {
-            // Values WITH TIME ZONE arrive as text (see TimeZonesAsText); the real type is the one described before that.
-            var zoned = i < nativeTypes.Length && nativeTypes[i].Contains("TIME ZONE", StringComparison.Ordinal);
-            var type = zoned ? nativeTypes[i] : reader.GetDataTypeName(i);
+            var type = reader.GetDataTypeName(i);
             if (type == "BLOB SUB_TYPE 1")
             {
                 type = "BLOB SUB_TYPE TEXT";
@@ -297,36 +323,29 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
         return columns;
     }
 
-    private static string[] Describe(FbConnection connection, FbTransaction transaction, string sql)
-    {
-        using var command = new FbCommand(sql, connection, transaction);
-        using var reader = command.ExecuteReader(CommandBehavior.SchemaOnly);
-        var types = new string[reader.FieldCount];
-        for (var i = 0; i < types.Length; i++)
-        {
-            types[i] = reader.GetDataTypeName(i);
-        }
-
-        return types;
-    }
-
-    // Firebird 4+. The server then sends TIME / TIMESTAMP WITH TIME ZONE as text, "2026-11-22 10:00:00.1234
-    // Europe/Budapest" or "... +03:00": the zone stays as it is stored, no time zone database is needed here,
-    // and the driver's own reading of these types, which fails on zones given as an offset, is not used.
+    // Firebird 4+, after the columns have been described with their real types. The server then sends as
+    // text the values the driver cannot read in full: TIME / TIMESTAMP WITH TIME ZONE ("2026-11-22
+    // 10:00:00.1234 Europe/Budapest" or "... +03:00"; the driver fails on zones given as an offset) and
+    // INT128 with the NUMERIC / DECIMAL of more than 18 digits built on it (the driver reads those into a
+    // .NET decimal, which holds 28 digits of the 38). The text is exact and keeps the scale and the zone.
     // Older servers have neither the statement nor the types.
-    private static void TimeZonesAsText(FbConnection connection)
+    private static void WideTypesAsText(FbConnection connection)
     {
-        try
+        foreach (var type in new[] { "time zone", "int128", "numeric(38)" })
         {
-            using var command = new FbCommand("set bind of time zone to varchar", connection);
-            command.ExecuteNonQuery();
-        }
-        catch (FbException)
-        {
+            try
+            {
+                using var command = new FbCommand($"set bind of {type} to varchar", connection);
+                command.ExecuteNonQuery();
+            }
+            catch (FbException)
+            {
+                return;
+            }
         }
     }
 
-    private sealed record ServerInfo(string? Time, string? EngineVersion, string? User);
+    private sealed record ServerInfo(string? Time, string? EngineVersion, string? User, bool? Compressed);
 
     private static ServerInfo ReadServerInfo(FbConnection connection, FbTransaction transaction)
     {
@@ -337,13 +356,36 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
         using var reader = command.ExecuteReader();
         if (!reader.Read())
         {
-            return new ServerInfo(null, null, null);
+            return new ServerInfo(null, null, null, null);
         }
 
         return new ServerInfo(
             ValueFormatter.Format(reader.GetValue(0), "TIMESTAMP", null),
             ValueFormatter.Format(reader.GetValue(1), "VARCHAR", null),
-            ValueFormatter.Format(reader.GetValue(2), "VARCHAR", null));
+            ValueFormatter.Format(reader.GetValue(2), "VARCHAR", null),
+            ReadCompressed(connection, transaction));
+    }
+
+    // Firebird 4+; null where the server does not tell.
+    private static bool? ReadCompressed(FbConnection connection, FbTransaction transaction)
+    {
+        try
+        {
+            using var command = new FbCommand(
+                "select MON$WIRE_COMPRESSED from MON$ATTACHMENTS where MON$ATTACHMENT_ID = current_connection",
+                connection,
+                transaction);
+            return command.ExecuteScalar() switch
+            {
+                bool b => b,
+                string s => s.Trim().Equals("TRUE", StringComparison.OrdinalIgnoreCase),
+                _ => null,
+            };
+        }
+        catch (FbException)
+        {
+            return null;
+        }
     }
 
     private static void WriteMeta(
@@ -381,6 +423,11 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             json.WriteString("time", server.Time);
             json.WriteString("engine", server.EngineVersion);
             json.WriteString("user", server.User);
+            if (server.Compressed is { } compressed)
+            {
+                json.WriteBoolean("compressed", compressed);
+            }
+
             json.WriteEndObject();
             json.WriteString("isolation", isolation == Isolation.Snapshot ? "snapshot" : "read-committed");
             json.WriteNumber("line", statement.Line);

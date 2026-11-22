@@ -78,13 +78,15 @@ public sealed record DatabaseAddress(string? Host, int Port, string Database)
 }
 
 /// <param name="ClientLibrary">Path or name of fbclient; null means the driver's own protocol, without fbclient.</param>
+/// <param name="Compress">Ask for a compressed connection (the driver's own protocol only).</param>
 public sealed record ConnectionSettings(
     DatabaseAddress Address,
     string User,
     string Password,
     string Charset = "UTF8",
     string? Role = null,
-    string? ClientLibrary = null)
+    string? ClientLibrary = null,
+    bool Compress = false)
 {
     public bool Native => ClientLibrary is not null;
 
@@ -116,6 +118,9 @@ public sealed record ConnectionSettings(
         }
         else
         {
+            // Through fbclient the driver has no way to ask for compression: there it is WireCompression in
+            // the firebird.conf next to fbclient.
+            builder.Compression = Compress;
             builder.DataSource = Address.Host ?? "localhost";
             builder.Port = Address.Port;
             builder.Database = Address.Database;
