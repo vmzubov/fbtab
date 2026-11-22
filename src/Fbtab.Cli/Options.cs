@@ -11,6 +11,7 @@ internal sealed record Options(
     string? FbClient,
     bool Managed,
     bool Compress,
+    bool AllowDml,
     Isolation Isolation,
     string OutDir,
     IReadOnlyList<string> Files)
@@ -32,6 +33,8 @@ internal sealed record Options(
           --compress             compress the connection: worth it over a slow link. With --managed
                                  it is enough; through fbclient it is the client's own setting,
                                  "WireCompression = true" in the firebird.conf next to fbclient
+          --allow-dml            also run INSERT, UPDATE, DELETE and MERGE. The transaction stays read only,
+                                 so the server lets them change global temporary tables and nothing else
           --isolation <mode>     read-committed (default) or snapshot; a file can ask for its own
                                  with a first-lines comment "-- isolation: snapshot"
           --out <dir>            where to write (default: current directory)
@@ -54,6 +57,7 @@ internal sealed record Options(
         var files = new List<string>();
         var managed = false;
         var compress = false;
+        var allowDml = false;
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
@@ -64,6 +68,10 @@ internal sealed record Options(
             else if (arg == "--compress")
             {
                 compress = true;
+            }
+            else if (arg == "--allow-dml")
+            {
+                allowDml = true;
             }
             else if (WithValue.Contains(arg))
             {
@@ -127,6 +135,7 @@ internal sealed record Options(
             fbclient,
             managed,
             compress,
+            allowDml,
             isolation,
             values.GetValueOrDefault("--out") ?? ".",
             files);

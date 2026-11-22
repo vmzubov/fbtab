@@ -56,10 +56,11 @@ public class SqlScriptTests
     [InlineData("execute procedure p(1)", StatementKind.Query)]
     [InlineData("Execute Block as begin end", StatementKind.Query)]
     [InlineData("execute statement 'x'", StatementKind.Forbidden)]
-    [InlineData("update t set a = 1", StatementKind.Forbidden)]
-    [InlineData("insert into t values (1)", StatementKind.Forbidden)]
-    [InlineData("delete from t", StatementKind.Forbidden)]
-    [InlineData("merge into t using s on 1=1 when matched then delete", StatementKind.Forbidden)]
+    [InlineData("update t set a = 1", StatementKind.Dml)]
+    [InlineData("update or insert into t values (1) matching (a)", StatementKind.Dml)]
+    [InlineData("insert into t values (1)", StatementKind.Dml)]
+    [InlineData(" -- c\n Delete from t", StatementKind.Dml)]
+    [InlineData("merge into t using s on 1=1 when matched then delete", StatementKind.Dml)]
     [InlineData("create table t (a int)", StatementKind.Forbidden)]
     [InlineData("alter table t add b int", StatementKind.Forbidden)]
     [InlineData("drop table t", StatementKind.Forbidden)]
@@ -69,7 +70,7 @@ public class SqlScriptTests
     [InlineData("set generator g to 1", StatementKind.Forbidden)]
     [InlineData("set statistics index i", StatementKind.Forbidden)]
     [InlineData("grant select on t to u", StatementKind.Forbidden)]
-    [InlineData("-- select\nupdate t set a = 1", StatementKind.Forbidden)]
+    [InlineData("-- select\nupdate t set a = 1", StatementKind.Dml)]
     [InlineData("connect 'x'", StatementKind.Forbidden)]
     public void Classifies(string sql, StatementKind expected) => Assert.Equal(expected, SqlScriptParser.Classify(sql));
 
@@ -95,7 +96,7 @@ public class SqlScriptTests
         var statement = Assert.Single(script.Statements);
         Assert.Equal(4, statement.Line);
         Assert.Equal("update T set A = 1", statement.Text);
-        Assert.Equal(StatementKind.Forbidden, statement.Kind);
+        Assert.Equal(StatementKind.Dml, statement.Kind);
     }
 
     [Fact]

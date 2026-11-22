@@ -88,7 +88,7 @@ namespace Fbtab.Cli
         {
             var live = !Console.IsErrorRedirected;
             var lastReport = DateTime.UtcNow;
-            var exporter = new Exporter(settings, options.OutDir, options.Isolation)
+            var exporter = new Exporter(settings, options.OutDir, options.Isolation, options.AllowDml)
             {
                 Progress = (name, rows) =>
                 {

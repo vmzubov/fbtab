@@ -62,6 +62,8 @@ public sealed class TestDatabase
             """);
         Run(connection, "create table MANY (ID integer not null primary key, NAME varchar(50))");
         Run(connection, "create table GUARD (ID integer)");
+        Run(connection, "create global temporary table LIST (ID integer, S varchar(20)) on commit preserve rows");
+        Run(connection, "create global temporary table LIST_TX (ID integer) on commit delete rows");
         Run(connection, """
             insert into T values (1, -32768, 9223372036854775807, 170141183460469231731687303715884105727,
               12.5, -0.0001, 12345678901234567890123456789012345.1, 0.1, 1.5, 1.5,
@@ -131,6 +133,9 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
 
     private ExportOutcome Export(ConnectionSettings settings, string outName, string sqlPath, CancellationToken cancel = default) =>
         new Exporter(settings, Path.Combine(_dir, outName)).ExportFile(sqlPath, cancel);
+
+    private ExportOutcome ExportDml(ConnectionSettings settings, string outName, string sqlPath) =>
+        new Exporter(settings, Path.Combine(_dir, outName), allowDml: true).ExportFile(sqlPath);
 
     private const string AllTypes = "select * from T order by ID;";
 
@@ -296,10 +301,83 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
     }
 
     [IntegrationFact]
+    public void DmlNeedsAllowDmlAndIsRefusedBeforeConnecting()
+    {
+        var wrong = _db.Managed! with { Password = "wrong password" };
+        var outcome = Export(wrong, "nodml", Sql("nodml", "insert into LIST values (1, 'a');\nselect * from LIST;"));
+        Assert.Equal(ExportStatus.Failed, outcome.Status);
+        Assert.StartsWith("line 1:", outcome.Message);
+        Assert.Contains("--allow-dml", outcome.Message);
+    }
+
+    private const string LoadList = """
+        -- a list loaded into a temporary table and joined with the data
+        delete from LIST;
+        insert into LIST values (1, 'один');
+        insert into LIST values (2, 'два');
+        update LIST set S = S || '!' where ID = 2;
+        insert into LIST values (-7, 'нет в MANY');
+        insert into LIST_TX values (1);
+        select L.ID, L.S, M.NAME from LIST L join MANY M on M.ID = L.ID order by L.ID;
+        select count(*) CNT from LIST_TX;
+        """;
+
+    private void CheckDmlIntoTemporaryTables(ConnectionSettings settings, string outName)
+    {
+        var outcome = ExportDml(settings, outName, Sql("list", LoadList));
+        Assert.Equal(ExportStatus.Ok, outcome.Status);
+
+        // Only the statements that return rows give files, numbered among themselves.
+        Assert.Equal(["list.tsv", "list_2.tsv"], outcome.Files.Select(Path.GetFileName));
+        Assert.Equal(3, outcome.Rows);
+        Assert.Equal(
+            [["ID", "S", "NAME"], ["1", "один", "имя 1"], ["2", "два!", "имя 2"]],
+            ReadTsv(outcome.Files[0]));
+        Assert.Equal("1", ReadTsv(outcome.Files[1])[1][0]);
+
+        using var meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(_dir, outName, "list.meta.json")));
+        Assert.Equal(8, meta.RootElement.GetProperty("line").GetInt32());
+    }
+
+    [IntegrationFact]
+    public void DmlIntoTemporaryTablesManaged() => CheckDmlIntoTemporaryTables(_db.Managed!, "dml_managed");
+
+    [IntegrationFact(native: true)]
+    public void DmlIntoTemporaryTablesNative() => CheckDmlIntoTemporaryTables(_db.Native!, "dml_native");
+
+    [IntegrationFact]
+    public void DmlIntoATableIsRefusedByTheServer()
+    {
+        var outcome = ExportDml(_db.Managed!, "dmltable", Sql("dmltable", "insert into LIST values (1, 'a');\ninsert into GUARD values (1);\nselect 1 X from rdb$database;"));
+        Assert.Equal(ExportStatus.Failed, outcome.Status);
+        Assert.StartsWith("line 2:", outcome.Message);
+        Assert.Contains("read-only", outcome.Message);
+        Assert.Empty(outcome.Files);
+
+        var check = Export(_db.Managed!, "dmltable", Sql("guard2", "select count(*) from GUARD;"));
+        Assert.Equal("0", ReadTsv(check.Files[0])[1][0]);
+    }
+
+    [IntegrationFact]
+    public void BlockWithoutRowsGivesNoFileAndDoesNotTakeANumber()
+    {
+        var sql = Sql("block", """
+            set term ^ ;
+            execute block as begin delete from LIST; insert into LIST values (5, 'x'); end^
+            set term ; ^
+            select count(*) CNT from LIST;
+            """);
+        var outcome = Export(_db.Managed!, "block", sql);
+        Assert.Equal(ExportStatus.Ok, outcome.Status);
+        Assert.Equal(["block.tsv"], outcome.Files.Select(Path.GetFileName));
+        Assert.Equal("1", ReadTsv(outcome.Files[0])[1][0]);
+    }
+
+    [IntegrationFact]
     public void ForbiddenStatementStopsTheFileBeforeConnecting()
     {
         var wrong = _db.Managed! with { Password = "wrong password" };
-        var outcome = Export(wrong, "forbidden", Sql("forbidden", "select 1 from rdb$database;\ndelete from GUARD;"));
+        var outcome = Export(wrong, "forbidden", Sql("forbidden", "select 1 from rdb$database;\ncommit;"));
         Assert.Equal(ExportStatus.Failed, outcome.Status);
         Assert.StartsWith("line 2:", outcome.Message);
     }

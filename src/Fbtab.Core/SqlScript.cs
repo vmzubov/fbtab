@@ -19,6 +19,10 @@ public enum StatementKind
     /// <summary>An isql display setting (SET LIST, SET COUNT...): ignored, so scripts written for isql run as they are.</summary>
     IsqlSetting,
 
+    /// <summary>INSERT, UPDATE, DELETE, MERGE: run only when allowed (--allow-dml). In the read-only
+    /// transaction the server lets them change global temporary tables and nothing else.</summary>
+    Dml,
+
     /// <summary>Anything else: refused before anything is sent to the server.</summary>
     Forbidden,
 }
@@ -169,6 +173,11 @@ public static partial class SqlScriptParser
                 return w.Length > 1 && w[1] is "BLOCK" or "PROCEDURE" ? StatementKind.Query : StatementKind.Forbidden;
             case "SET":
                 return w.Length > 1 && IsqlSettings.Contains(w[1]) ? StatementKind.IsqlSetting : StatementKind.Forbidden;
+            case "INSERT":
+            case "UPDATE":
+            case "DELETE":
+            case "MERGE":
+                return StatementKind.Dml;
             default:
                 return StatementKind.Forbidden;
         }

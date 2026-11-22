@@ -35,7 +35,13 @@ public sealed record ExportOutcome(
 public sealed record ColumnInfo(string Name, string Type, int? Length, int? Scale, bool? Nullable);
 
 /// <summary>Runs sql files, each on its own connection in its own read-only transaction, and writes tsv.</summary>
-public sealed class Exporter(ConnectionSettings settings, string outDir, Isolation defaultIsolation = Isolation.ReadCommitted)
+/// <param name="allowDml">Run INSERT, UPDATE, DELETE and MERGE too. The transaction stays read only, so the server
+/// lets them change global temporary tables only: a list loaded into one can then be joined in a query.</param>
+public sealed class Exporter(
+    ConnectionSettings settings,
+    string outDir,
+    Isolation defaultIsolation = Isolation.ReadCommitted,
+    bool allowDml = false)
 {
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
@@ -71,15 +77,18 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             return Result(ExportStatus.Failed, message: e.Message);
         }
 
-        var forbidden = script.Statements.FirstOrDefault(s => s.Kind == StatementKind.Forbidden);
+        var forbidden = script.Statements.FirstOrDefault(s => s.Kind == StatementKind.Forbidden || (s.Kind == StatementKind.Dml && !allowDml));
         if (forbidden is not null)
         {
-            return Result(ExportStatus.Failed, message:
-                $"line {forbidden.Line}: only SELECT, WITH, EXECUTE BLOCK and EXECUTE PROCEDURE are allowed, found: {Head(forbidden.Text)}");
+            return Result(ExportStatus.Failed, message: forbidden.Kind == StatementKind.Dml
+                ? $"line {forbidden.Line}: INSERT, UPDATE, DELETE and MERGE run only with --allow-dml, found: {Head(forbidden.Text)}"
+                : $"line {forbidden.Line}: only SELECT, WITH, EXECUTE BLOCK and EXECUTE PROCEDURE are allowed"
+                  + (allowDml ? " (and INSERT, UPDATE, DELETE, MERGE)" : "") + $", found: {Head(forbidden.Text)}");
         }
 
-        var queries = script.Statements.Where(s => s.Kind == StatementKind.Query).ToList();
-        if (queries.Count == 0)
+        // Statements run in their order; queries are described before anything runs, DML is not.
+        var statements = script.Statements.Where(s => s.Kind is StatementKind.Query or StatementKind.Dml).ToList();
+        if (statements.Count == 0)
         {
             return Result(ExportStatus.Failed, message: "no query in the file");
         }
@@ -119,12 +128,19 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             try
             {
                 // Every query is prepared before the first one runs, so a mistake in the last query of a
-                // file shows up at once and not after an hour of the first.
-                var described = new List<IReadOnlyList<ColumnInfo>>();
+                // file shows up at once and not after an hour of the first. DML is not: a list loaded into a
+                // temporary table can be thousands of inserts, and each prepare is a round trip to the server.
+                var described = new List<IReadOnlyList<ColumnInfo>?>();
                 using (var describing = connection.BeginTransaction(TransactionOptions(isolation)))
                 {
-                    foreach (var query in queries)
+                    foreach (var query in statements)
                     {
+                        if (query.Kind == StatementKind.Dml)
+                        {
+                            described.Add(null);
+                            continue;
+                        }
+
                         try
                         {
                             described.Add(Describe(connection, describing, query.Text));
@@ -152,15 +168,25 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
                         : "the connection is not compressed: the server did not agree to it");
                 }
 
-                for (var i = 0; i < queries.Count; i++)
+                // Files are numbered by the statements that return rows: <name>.tsv, <name>_2.tsv, ...
+                var outputs = 0;
+                for (var i = 0; i < statements.Count; i++)
                 {
                     cancel.ThrowIfCancellationRequested();
-                    var baseName = i == 0 ? name : $"{name}_{i + 1}";
-                    using var command = new FbCommand(queries[i].Text, connection, transaction) { FetchSize = FetchRows };
+                    var statement = statements[i];
+                    using var command = new FbCommand(statement.Text, connection, transaction) { FetchSize = FetchRows };
                     running = command;
                     try
                     {
-                        var written = ExportQuery(command, queries[i], described[i], baseName, isolation, server, cancel, r => Progress?.Invoke(name, rows + r));
+                        if (described[i] is not { Count: > 0 } columns)
+                        {
+                            command.ExecuteNonQuery();
+                            continue;
+                        }
+
+                        outputs++;
+                        var baseName = outputs == 1 ? name : $"{name}_{outputs}";
+                        var written = ExportQuery(command, statement, columns, baseName, isolation, server, cancel, r => Progress?.Invoke(name, rows + r));
                         if (written is { } w)
                         {
                             rows += w.Rows;
@@ -172,7 +198,7 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
                         return Result(
                             IsConnectionLost(e) ? ExportStatus.ConnectionFailed : ExportStatus.Failed,
                             e.SQLSTATE,
-                            $"line {queries[i].Line}: {e.Message}");
+                            $"line {statement.Line}: {e.Message}");
                     }
                     finally
                     {
