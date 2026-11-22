@@ -375,6 +375,90 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
         Assert.True(meta.RootElement.GetProperty("server").GetProperty("compressed").GetBoolean());
     }
 
+    /// <summary>Runs an export through a relay that spoils the server's answers; a hung export fails the test.</summary>
+    private ExportOutcome ExportThrough(Relay relay, bool compress, string outName, string sqlPath)
+    {
+        var settings = _db.Managed! with
+        {
+            Address = _db.Managed!.Address with { Host = "127.0.0.1", Port = relay.Port },
+            Compress = compress,
+        };
+        var export = Task.Run(() => Export(settings, outName, sqlPath));
+        Assert.True(export.Wait(TimeSpan.FromSeconds(60)), "the export hangs");
+        return export.Result;
+    }
+
+    private Relay RelayToServer(int pieceSize = 0, long breakAfter = -1) =>
+        new(_db.Managed!.Address.Host ?? "localhost", _db.Managed!.Address.Port, pieceSize, breakAfter);
+
+    private void CheckSameFiles(string expectedDir, string actualDir, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            Assert.Equal(File.ReadAllBytes(Path.Combine(_dir, expectedDir, name)), File.ReadAllBytes(Path.Combine(_dir, actualDir, name)));
+        }
+    }
+
+    [IntegrationFact]
+    public void BrokenAnswerFailsTheFileInsteadOfCrashing()
+    {
+        var sql = Sql("broken", AllTypes + "\nselect * from MANY order by ID;");
+        Assert.Equal(ExportStatus.Ok, Export(_db.Managed!, "whole", sql).Status);
+        var failed = 0;
+        foreach (var compress in new[] { false, true })
+        {
+            // From the first bytes of the handshake to the middle of the rows.
+            foreach (var breakAfter in new long[] { 0, 10, 100, 500, 1000, 2000, 3000, 5000, 10_000, 50_000, 200_000 })
+            {
+                using var relay = RelayToServer(breakAfter: breakAfter);
+                var outName = $"broken-{compress}-{breakAfter}";
+                var outcome = ExportThrough(relay, compress, outName, sql);
+                if (outcome.Status == ExportStatus.Ok)
+                {
+                    // Compressed, the whole answer can be shorter than the break point.
+                    CheckSameFiles("whole", outName, "broken.tsv", "broken_2.tsv");
+                    continue;
+                }
+
+                failed++;
+                Assert.True(
+                    outcome.Status is ExportStatus.Failed or ExportStatus.ConnectionFailed,
+                    $"compress={compress}, break after {breakAfter}: {outcome.Status} {outcome.Message}");
+                Assert.False(string.IsNullOrWhiteSpace(outcome.Message));
+            }
+        }
+
+        Assert.True(failed >= 20, $"only {failed} exports were broken");
+    }
+
+    [IntegrationFact]
+    public void AnswerInSmallPiecesNeverCrashes()
+    {
+        // With compression the driver can lose its place in an answer that comes in small pieces
+        // (FirebirdSQL/NETProvider#1293) and then throws whatever it stumbles on. That may fail the file, but
+        // when the export says OK the bytes must be right.
+        var sql = Sql("pieces", "select * from T where ID < 5 order by ID;\nselect first 2000 * from MANY order by ID;");
+        Assert.Equal(ExportStatus.Ok, Export(_db.Managed!, "whole", sql).Status);
+        foreach (var compress in new[] { false, true })
+        {
+            using var relay = RelayToServer(pieceSize: 64);
+            var outName = $"pieces-{compress}";
+            var outcome = ExportThrough(relay, compress, outName, sql);
+            if (outcome.Status == ExportStatus.Ok)
+            {
+                CheckSameFiles("whole", outName, "pieces.tsv", "pieces_2.tsv");
+            }
+            else
+            {
+                Assert.True(compress, $"without compression: {outcome.Status} {outcome.Message}");
+                Assert.True(
+                    outcome.Status is ExportStatus.Failed or ExportStatus.ConnectionFailed,
+                    $"{outcome.Status} {outcome.Message}");
+                Assert.False(string.IsNullOrWhiteSpace(outcome.Message));
+            }
+        }
+    }
+
     private const string Slow = "select count(*) from MANY a, MANY b, MANY c;";
 
     private void CheckCancel(ConnectionSettings settings, string outName)

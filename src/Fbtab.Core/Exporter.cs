@@ -96,8 +96,12 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
         {
             return Result(ExportStatus.ConnectionFailed, e.SQLSTATE, e.Message);
         }
+        catch (Exception e) when (!IsFatal(e))
+        {
+            return Result(ExportStatus.ConnectionFailed, message: Unexpected(e));
+        }
 
-        using (connection)
+        try
         {
             FbCommand? running = null;
             using var registration = cancel.Register(() =>
@@ -179,7 +183,7 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
                 transaction.Rollback();
                 return Result(ExportStatus.Ok);
             }
-            catch (Exception e) when (cancel.IsCancellationRequested && e is FbException or OperationCanceledException)
+            catch (Exception e) when (cancel.IsCancellationRequested && !IsFatal(e))
             {
                 return Result(ExportStatus.Cancelled, message: "cancelled");
             }
@@ -187,13 +191,36 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             {
                 return Result(IsConnectionLost(e) ? ExportStatus.ConnectionFailed : ExportStatus.Failed, e.SQLSTATE, e.Message);
             }
-            catch (Exception e) when (e is OverflowException or ArgumentException or InvalidCastException or FormatException or InvalidOperationException)
+            catch (ValueException e)
             {
-                // The driver could not turn a value into a .NET one. The file stays as .part; the run goes on.
-                return Result(ExportStatus.Failed, message: "cannot read a value: " + e.Message);
+                // The file stays as .part; the run goes on.
+                return Result(ExportStatus.Failed, message: e.Message);
+            }
+            catch (Exception e) when (!IsFatal(e))
+            {
+                // Anything else the driver or the disk throws, a damaged answer from the server included: it
+                // fails this file, not the run.
+                return Result(ExportStatus.Failed, message: Unexpected(e));
+            }
+        }
+        finally
+        {
+            try
+            {
+                connection.Dispose();
+            }
+            catch (Exception e) when (!IsFatal(e))
+            {
+                // A connection left in a bad state may fail to close; the outcome is already decided.
             }
         }
     }
+
+    private static bool IsFatal(Exception e) => e is OutOfMemoryException or AccessViolationException;
+
+    private static string Unexpected(Exception e) => $"{e.GetType().Name}: {e.Message}";
+
+    private sealed class ValueException(string message, Exception inner) : Exception(message, inner);
 
     private (string Path, long Rows)? ExportQuery(
         FbCommand command,
@@ -245,10 +272,19 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             var nextReport = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
             while (reader.Read())
             {
-                for (var i = 0; i < types.Length; i++)
+                var i = 0;
+                try
                 {
-                    var value = reader.GetValue(i);
-                    tsv.Field(value is DBNull && alwaysEmpty[i] ? "" : ValueFormatter.Format(value, types[i], scales[i]));
+                    for (; i < types.Length; i++)
+                    {
+                        var value = reader.GetValue(i);
+                        tsv.Field(value is DBNull && alwaysEmpty[i] ? "" : ValueFormatter.Format(value, types[i], scales[i]));
+                    }
+                }
+                catch (Exception e) when (e is OverflowException or ArgumentException or InvalidCastException or FormatException or InvalidOperationException)
+                {
+                    // The driver could not turn a value into a .NET one.
+                    throw new ValueException($"cannot read a value of column {columns[i].Name}: {e.Message}", e);
                 }
 
                 tsv.EndRow();
