@@ -14,8 +14,9 @@ public class SqlScriptTests
         Assert.Equal(3, script.Statements.Count);
         Assert.All(script.Statements, s => Assert.Equal(StatementKind.Query, s.Kind));
         Assert.EndsWith("from t", script.Statements[0].Text);
-        Assert.Equal(1, script.Statements[0].Line);
-        Assert.Equal(2, script.Statements[1].Line); // the comment before it is part of the statement
+        Assert.Equal(2, script.Statements[0].Line);
+        Assert.Equal(3, script.Statements[1].Line);
+        Assert.StartsWith("select q'", script.Statements[1].Text);
         Assert.Contains("it''s; ok", script.Statements[2].Text);
     }
 
@@ -85,6 +86,16 @@ public class SqlScriptTests
     {
         var script = SqlScriptParser.Parse("\uFEFFselect 1 from rdb$database;\n-- the end\n/* really */\n");
         Assert.Single(script.Statements);
+    }
+
+    [Fact]
+    public void LineAndTextPointAtTheStatementNotAtCommentsBeforeIt()
+    {
+        var script = SqlScriptParser.Parse("-- what it does\n-- expected: 1 s\n\n/* more */ update T set A = 1;\n");
+        var statement = Assert.Single(script.Statements);
+        Assert.Equal(4, statement.Line);
+        Assert.Equal("update T set A = 1", statement.Text);
+        Assert.Equal(StatementKind.Forbidden, statement.Kind);
     }
 
     [Fact]

@@ -167,6 +167,9 @@ One thing a read-only transaction still allows is writing to global temporary ta
 
 - No parameters: the sql is run as written.
 - NUMERIC with more than 28 significant digits is beyond what the driver reads into a .NET decimal.
+- Through fbclient an expression whose type is a zero-length string and which can be NULL (for example
+  `nullif('', X)`) is written as `\N` in both cases: the driver does not tell them apart. A plain `''`
+  and real columns are not affected.
 - CSV and Parquet output are planned, not done.
 
 ## Build
