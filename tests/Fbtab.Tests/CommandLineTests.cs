@@ -46,6 +46,16 @@ public class CommandLineTests
         Assert.Equal("res", o.OutDir);
         Assert.Equal(["a.sql", "b.sql"], o.Files);
         Assert.False(o.Managed);
+        Assert.False(o.Compress);
+    }
+
+    [Fact]
+    public void CompressGoesIntoTheManagedConnectionString()
+    {
+        var o = Options.Parse(["--db", "h:a", "--user", "U", "--managed", "--compress", "a.sql"], NoEnv);
+        Assert.True(o.Compress);
+        var settings = new ConnectionSettings(DatabaseAddress.Parse(o.Database), o.User, "p", Compress: o.Compress);
+        Assert.Contains("compression=True", settings.BuildConnectionString(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

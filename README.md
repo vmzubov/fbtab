@@ -33,6 +33,9 @@ fbtab writes a file those tools read as it is.
 - **Connects where isql connects.** By default fbtab goes through `fbclient`, so every authentication
   plugin, wire encryption and compression setting that works for `isql` works here. `--managed`
   connects without fbclient (Srp and Legacy_Auth only).
+- **The same output from any server.** fbtab asks the server for the real types, so `INT128`,
+  `DECFLOAT`, `BOOLEAN` and time zones come out the same whether or not the server runs with
+  `DataTypeCompatibility`.
 - **The password is never on the command line and never stored**: it comes from `FBTAB_PASSWORD` or
   `ISC_PASSWORD`, or is typed in.
 
@@ -50,6 +53,7 @@ fbtab --db <database> --user <user> [options] <file.sql> [<file.sql> ...]
   --fbclient <path>      fbclient library to connect through (default: FBTAB_FBCLIENT,
                          then the one next to fbtab, then the one the system finds)
   --managed              connect without fbclient
+  --compress             compress the connection (see "Slow links")
   --isolation <mode>     read-committed (default) or snapshot
   --out <dir>            where to write (default: current directory)
   --version, --help
@@ -70,6 +74,21 @@ CANCELLED <name> rows=<n> sec=<s>
 | 2 | no connection or wrong credentials; the run stops at that file |
 | 3 | bad arguments, missing file, no password, fbclient cannot be loaded |
 | 4 | cancelled with Ctrl+C: the statement is cancelled on the server, the transaction rolled back |
+
+### Slow links
+
+Over a slow or distant link most of the time goes into moving bytes, and query results compress well:
+in a test over a link with a 100 ms round trip and 6 Mbit/s compression made an export four times
+faster.
+
+- With `--managed`, `--compress` switches compression on.
+- Through fbclient the client library decides: put the line `WireCompression = true` into the
+  `firebird.conf` next to fbclient (on Windows `zlib1.dll` has to be next to it as well). `--compress`
+  then only checks: if the connection came out uncompressed, fbtab says so.
+
+The server has to allow it too, which Firebird 3 and later do by default. Whether a connection was
+compressed is in the meta.json (`server.compressed`). On a fast local network compression only costs
+CPU: leave it off.
 
 ### Isolation
 
@@ -108,7 +127,7 @@ This is the text format of PostgreSQL `COPY`. A line of the file is always exact
 | Firebird type | Written as |
 |---|---|
 | SMALLINT, INTEGER, BIGINT, INT128 | digits |
-| NUMERIC, DECIMAL | exact, with a point and all digits of the scale: `12.50` |
+| NUMERIC, DECIMAL | exact, with a point and all digits of the scale: `12.50`; all 38 digits of a NUMERIC(38) |
 | DOUBLE PRECISION, FLOAT | shortest text that reads back to the same value: `0.1`, `1E+300` |
 | DECFLOAT | plain number: `1.5` |
 | DATE | `2026-11-22` |
@@ -150,7 +169,8 @@ unescape = lambda s: re.sub(r'\\(.)', lambda m: {'t': '\t', 'n': '\n', 'r': '\r'
 ### The meta.json
 
 What was run and what came back: the sql text and its line in the file, row count, start and finish
-time, server time, engine version, user, isolation, and for every column its name, Firebird type,
+time, server time, engine version, user, isolation, whether the connection was compressed, and for
+every column its name, Firebird type,
 length, scale and whether it can be NULL.
 
 ## What protects the database
@@ -166,7 +186,6 @@ One thing a read-only transaction still allows is writing to global temporary ta
 ## Limits
 
 - No parameters: the sql is run as written.
-- NUMERIC with more than 28 significant digits is beyond what the driver reads into a .NET decimal.
 - Through fbclient an expression whose type is a zero-length string and which can be NULL (for example
   `nullif('', X)`) is written as `\N` in both cases: the driver does not tell them apart. A plain `''`
   and real columns are not affected.

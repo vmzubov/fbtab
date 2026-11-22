@@ -10,6 +10,7 @@ internal sealed record Options(
     string Charset,
     string? FbClient,
     bool Managed,
+    bool Compress,
     Isolation Isolation,
     string OutDir,
     IReadOnlyList<string> Files)
@@ -28,6 +29,9 @@ internal sealed record Options(
           --fbclient <path>      fbclient library to connect through (default: FBTAB_FBCLIENT,
                                  then the one next to fbtab, then the one the system finds)
           --managed              connect without fbclient (Srp and Legacy_Auth only)
+          --compress             compress the connection: worth it over a slow link. With --managed
+                                 it is enough; through fbclient it is the client's own setting,
+                                 "WireCompression = true" in the firebird.conf next to fbclient
           --isolation <mode>     read-committed (default) or snapshot; a file can ask for its own
                                  with a first-lines comment "-- isolation: snapshot"
           --out <dir>            where to write (default: current directory)
@@ -49,12 +53,17 @@ internal sealed record Options(
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var files = new List<string>();
         var managed = false;
+        var compress = false;
         for (var i = 0; i < args.Count; i++)
         {
             var arg = args[i];
             if (arg == "--managed")
             {
                 managed = true;
+            }
+            else if (arg == "--compress")
+            {
+                compress = true;
             }
             else if (WithValue.Contains(arg))
             {
@@ -117,6 +126,7 @@ internal sealed record Options(
             values.GetValueOrDefault("--charset") ?? "UTF8",
             fbclient,
             managed,
+            compress,
             isolation,
             values.GetValueOrDefault("--out") ?? ".",
             files);

@@ -69,7 +69,7 @@ namespace Fbtab.Cli
                 }
 
                 var settings = new ConnectionSettings(
-                    address, options.User, Password.Read(options.User), options.Charset, options.Role, library);
+                    address, options.User, Password.Read(options.User), options.Charset, options.Role, library, options.Compress);
                 return Export(options, settings, cancel.Token);
             }
             catch (UsageException e)
@@ -103,6 +103,16 @@ namespace Fbtab.Cli
                         Console.Error.WriteLine($"{name}: {rows} rows");
                     }
                 },
+            };
+
+            exporter.Warning = text =>
+            {
+                if (live)
+                {
+                    Console.Error.Write("\r" + new string(' ', 60) + "\r");
+                }
+
+                Console.Error.WriteLine("fbtab: " + text);
             };
 
             var exit = ExitOk;

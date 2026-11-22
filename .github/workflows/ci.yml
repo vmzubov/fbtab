@@ -27,6 +27,8 @@ jobs:
           export FIREBIRD="$RUNNER_TEMP/fb/opt/firebird"
           export LD_LIBRARY_PATH="$FIREBIRD/lib"
           echo "RemoteServicePort = 3055" >> "$FIREBIRD/firebird.conf"
+          # the harder case: the server hands out INT128, DECFLOAT, BOOLEAN and zones as old types
+          echo "DataTypeCompatibility = 2.5" >> "$FIREBIRD/firebird.conf"
           echo "create user SYSDBA password 'masterkey';" | "$FIREBIRD/bin/isql" -q -user SYSDBA security.db
           nohup "$FIREBIRD/bin/firebird" > "$RUNNER_TEMP/fbdata/server.log" 2>&1 &
           sleep 3

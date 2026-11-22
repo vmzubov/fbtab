@@ -54,7 +54,7 @@ public sealed class TestDatabase
             create table T (
               ID integer not null primary key,
               SI smallint, BI bigint, I128 int128,
-              N numeric(18, 2), N4 numeric(9, 4), DP double precision, FL float, DF decfloat(34),
+              N numeric(18, 2), N4 numeric(9, 4), N38 numeric(38, 2), DP double precision, FL float, DF decfloat(34),
               D date, TM time, TS timestamp, TSTZ timestamp with time zone, TMTZ time with time zone,
               BO boolean,
               C char(10), VC varchar(100), TXT blob sub_type text,
@@ -64,7 +64,7 @@ public sealed class TestDatabase
         Run(connection, "create table GUARD (ID integer)");
         Run(connection, """
             insert into T values (1, -32768, 9223372036854775807, 170141183460469231731687303715884105727,
-              12.5, -0.0001, 0.1, 1.5, 1.5,
+              12.5, -0.0001, 12345678901234567890123456789012345.1, 0.1, 1.5, 1.5,
               '2026-11-22', '09:10:00.1234', '2026-11-22 09:10:00.1234',
               '2026-11-22 10:00:00.1234 Europe/Budapest', '10:00:00 +03:00',
               true,
@@ -151,12 +151,12 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
 
         var rows = ReadTsv(path);
         Assert.Equal(
-            ["ID", "SI", "BI", "I128", "N", "N4", "DP", "FL", "DF", "D", "TM", "TS", "TSTZ", "TMTZ", "BO", "C", "VC", "TXT", "BIN", "OCT", "UUID"],
+            ["ID", "SI", "BI", "I128", "N", "N4", "N38", "DP", "FL", "DF", "D", "TM", "TS", "TSTZ", "TMTZ", "BO", "C", "VC", "TXT", "BIN", "OCT", "UUID"],
             rows[0]);
         Assert.Equal(
             [
                 "1", "-32768", "9223372036854775807", "170141183460469231731687303715884105727",
-                "12.50", "-0.0001", "0.1", "1.5", "1.5",
+                "12.50", "-0.0001", "12345678901234567890123456789012345.10", "0.1", "1.5", "1.5",
                 "2026-11-22", "09:10:00.1234", "2026-11-22 09:10:00.1234",
                 "2026-11-22 10:00:00.1234 Europe/Budapest", "10:00:00.0000 +03:00",
                 "true",
@@ -166,20 +166,20 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
             rows[1]);
 
         // Row 2: empty strings are empty, not NULL; an empty CHAR(10) is ten spaces in Firebird and is trimmed.
-        Assert.Equal("", rows[2][15]);
         Assert.Equal("", rows[2][16]);
         Assert.Equal("", rows[2][17]);
-        Assert.Equal("false", rows[2][14]);
+        Assert.Equal("", rows[2][18]);
+        Assert.Equal("false", rows[2][15]);
         Assert.Null(rows[2][1]);
 
         // Row 3: everything but the key is NULL.
         Assert.All(rows[3].Skip(1), Assert.Null);
 
         // Row 4: the two characters \N as a value are not NULL.
-        Assert.Equal("\\N", rows[4][16]);
+        Assert.Equal("\\N", rows[4][17]);
 
         // Row 5: a long text with tabs and line breaks stays one line and comes back whole.
-        Assert.Equal(TestDatabase.LongText, rows[5][17]);
+        Assert.Equal(TestDatabase.LongText, rows[5][18]);
 
         using var meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(_dir, outName, "types.meta.json")));
         var root = meta.RootElement;
@@ -188,6 +188,11 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
         var columns = root.GetProperty("columns").EnumerateArray().ToDictionary(c => c.GetProperty("name").GetString()!);
         Assert.Equal("NUMERIC", columns["N"].GetProperty("type").GetString());
         Assert.Equal(2, columns["N"].GetProperty("scale").GetInt32());
+        Assert.Equal("INT128", columns["I128"].GetProperty("type").GetString());
+        Assert.Equal("NUMERIC", columns["N38"].GetProperty("type").GetString());
+        Assert.Equal(2, columns["N38"].GetProperty("scale").GetInt32());
+        Assert.Equal("BOOLEAN", columns["BO"].GetProperty("type").GetString());
+        Assert.Equal("DECFLOAT", columns["DF"].GetProperty("type").GetString());
         Assert.Equal("TIMESTAMP WITH TIME ZONE", columns["TSTZ"].GetProperty("type").GetString());
         Assert.Equal("TIME WITH TIME ZONE", columns["TMTZ"].GetProperty("type").GetString());
         Assert.Equal("BLOB SUB_TYPE TEXT", columns["TXT"].GetProperty("type").GetString());
@@ -350,6 +355,24 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
     {
         var outcome = Export(_db.Managed!, "rc", Sql("rc", "select rdb$get_context('SYSTEM', 'ISOLATION_LEVEL') L, rdb$get_context('SYSTEM', 'READ_ONLY') RO from rdb$database;"));
         Assert.Equal(["READ COMMITTED", "TRUE"], ReadTsv(outcome.Files[0])[1]);
+    }
+
+    [IntegrationFact]
+    public void CompressedConnectionGivesTheSameBytes()
+    {
+        var sql = Sql("zip", AllTypes + "\nselect * from MANY order by ID;");
+        Assert.Equal(ExportStatus.Ok, Export(_db.Managed!, "plain", sql).Status);
+        var warnings = new List<string>();
+        var exporter = new Exporter(_db.Managed! with { Compress = true }, Path.Combine(_dir, "zip")) { Warning = warnings.Add };
+        Assert.Equal(ExportStatus.Ok, exporter.ExportFile(sql).Status);
+        Assert.Empty(warnings);
+        foreach (var name in new[] { "zip.tsv", "zip_2.tsv" })
+        {
+            Assert.Equal(File.ReadAllBytes(Path.Combine(_dir, "plain", name)), File.ReadAllBytes(Path.Combine(_dir, "zip", name)));
+        }
+
+        using var meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(_dir, "zip", "zip.meta.json")));
+        Assert.True(meta.RootElement.GetProperty("server").GetProperty("compressed").GetBoolean());
     }
 
     private const string Slow = "select count(*) from MANY a, MANY b, MANY c;";
