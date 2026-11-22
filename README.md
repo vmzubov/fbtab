@@ -90,6 +90,11 @@ Prefer fbclient over a distant link when the result has BLOB columns: without it
 costs two more requests to the server, while fbclient 5.0.3 or later gets small BLOBs together with
 the row from a server of 5.0.3 or later.
 
+Compression with `--managed` has a known bug in the driver
+([FirebirdSQL/NETProvider#1293](https://github.com/FirebirdSQL/NETProvider/issues/1293)): on some links
+the driver loses its place in the server's answer. fbtab then reports an error for that file and goes on.
+If files fail only with `--managed --compress`, use fbclient: its compression does not have this problem.
+
 The server has to allow compression too, which Firebird 3 and later do by default. Whether a connection was
 compressed is in the meta.json (`server.compressed`). On a fast local network compression only costs
 CPU: leave it off.
