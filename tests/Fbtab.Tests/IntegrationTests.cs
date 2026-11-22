@@ -214,6 +214,20 @@ public sealed class IntegrationTests : IClassFixture<TestDatabase>, IDisposable
         }
     }
 
+    private void CheckEmptyLiterals(ConnectionSettings settings, string outName)
+    {
+        var sql = Sql("empty", "select '' E, cast('' as varchar(5)) V, cast('' as char(3)) C, '' || '' K, cast(null as varchar(5)) N from rdb$database;");
+        var outcome = Export(settings, outName, sql);
+        Assert.Equal(ExportStatus.Ok, outcome.Status);
+        Assert.Equal(["", "", "", "", null], ReadTsv(outcome.Files[0])[1]);
+    }
+
+    [IntegrationFact]
+    public void EmptyLiteralIsNotNull() => CheckEmptyLiterals(_db.Managed!, "emptym");
+
+    [IntegrationFact(native: true)]
+    public void EmptyLiteralIsNotNullThroughFbclient() => CheckEmptyLiterals(_db.Native!, "emptyn");
+
     [IntegrationFact(native: true)]
     public void FbclientGetsThePasswordWithoutIscPasswordSet()
     {

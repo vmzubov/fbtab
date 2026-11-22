@@ -203,6 +203,10 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             var types = columns.Select(c => c.Type).ToArray();
             var scales = columns.Select(c => c.Scale).ToArray();
 
+            // Through fbclient the driver reads a value of a zero-length type ('' as a literal is CHAR(0)) as NULL.
+            // Where the column cannot be NULL it is the empty string; a nullable CHAR(0) expression stays ambiguous.
+            var alwaysEmpty = columns.Select(c => c is { Type: "CHAR" or "VARCHAR", Length: 0, Nullable: false }).ToArray();
+
             using var stream = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 16);
             using var text = new StreamWriter(stream, Utf8NoBom, 1 << 16);
             var tsv = new TsvWriter(text);
@@ -218,7 +222,8 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
             {
                 for (var i = 0; i < types.Length; i++)
                 {
-                    tsv.Field(ValueFormatter.Format(reader.GetValue(i), types[i], scales[i]));
+                    var value = reader.GetValue(i);
+                    tsv.Field(value is DBNull && alwaysEmpty[i] ? "" : ValueFormatter.Format(value, types[i], scales[i]));
                 }
 
                 tsv.EndRow();

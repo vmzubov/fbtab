@@ -55,7 +55,20 @@ public static partial class SqlScriptParser
         {
             var text = current.ToString().Trim();
             current.Clear();
-            if (text.Length == 0 || FirstWords(text, 1).Length == 0)
+
+            // Comments before the statement are dropped, so the line number and error messages point at the statement itself.
+            var skip = LeadingCommentsLength(text);
+            var statementLine = startLine;
+            for (var k = 0; k < skip; k++)
+            {
+                if (text[k] == '\n')
+                {
+                    statementLine++;
+                }
+            }
+
+            text = text[skip..];
+            if (text.Length == 0)
             {
                 return;
             }
@@ -68,7 +81,7 @@ public static partial class SqlScriptParser
                 return;
             }
 
-            result.Add(new SqlStatement(text, startLine, Classify(text)));
+            result.Add(new SqlStatement(text, statementLine, Classify(text)));
         }
 
         while (i < script.Length)
@@ -168,6 +181,34 @@ public static partial class SqlScriptParser
         "NAMES", "SQLDA_DISPLAY", "BLOB", "BLOBDISPLAY", "TIME", "WNG", "WARNINGS", "ROWCOUNT", "MAXROWS",
         "PER_TABLE_STATS", "PER_TAB", "KEEP_TRAN_PARAMS", "KEEP_TRAN", "EXEC_PATH_DISPLAY", "LOCAL_TIMEOUT",
     };
+
+    private static int LeadingCommentsLength(string text)
+    {
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (char.IsWhiteSpace(text[i]))
+            {
+                i++;
+            }
+            else if (text[i] == '-' && Peek(text, i + 1) == '-')
+            {
+                var end = text.IndexOf('\n', i);
+                i = end < 0 ? text.Length : end;
+            }
+            else if (text[i] == '/' && Peek(text, i + 1) == '*')
+            {
+                var end = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                i = end < 0 ? text.Length : end + 2;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return i;
+    }
 
     /// <summary>Up to <paramref name="count"/> leading words in upper case, comments skipped.</summary>
     internal static string[] FirstWords(string text, int count)
