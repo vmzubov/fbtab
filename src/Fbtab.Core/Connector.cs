@@ -62,11 +62,30 @@ public static class Connector
     // must not depend on a server setting. Older servers have neither the statement nor the setting.
     private static void AskForNativeTypes(FbConnection connection)
     {
-        foreach (var type in new[] { "boolean", "int128", "decfloat", "time zone" })
+        SetBinds(connection, ["boolean to native", "int128 to native", "decfloat to native", "time zone to native"]);
+    }
+
+    // Every statement costs several round trips to the server, which is seconds per file over a distant
+    // link, so the binds go as one block. Should a server refuse the block, they go one by one, and a server
+    // that does not know the statement (Firebird 3) is left as it is after the first refusal.
+    internal static void SetBinds(FbConnection connection, IReadOnlyList<string> binds)
+    {
+        try
+        {
+            var block = "execute block as begin " + string.Concat(binds.Select(b => $"set bind of {b}; ")) + "end";
+            using var command = new FbCommand(block, connection);
+            command.ExecuteNonQuery();
+            return;
+        }
+        catch (FbException)
+        {
+        }
+
+        foreach (var bind in binds)
         {
             try
             {
-                using var command = new FbCommand($"set bind of {type} to native", connection);
+                using var command = new FbCommand($"set bind of {bind}", connection);
                 command.ExecuteNonQuery();
             }
             catch (FbException)

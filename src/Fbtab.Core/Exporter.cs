@@ -331,61 +331,44 @@ public sealed class Exporter(ConnectionSettings settings, string outDir, Isolati
     // Older servers have neither the statement nor the types.
     private static void WideTypesAsText(FbConnection connection)
     {
-        foreach (var type in new[] { "time zone", "int128", "numeric(38)" })
-        {
-            try
-            {
-                using var command = new FbCommand($"set bind of {type} to varchar", connection);
-                command.ExecuteNonQuery();
-            }
-            catch (FbException)
-            {
-                return;
-            }
-        }
+        Connector.SetBinds(connection, ["time zone to varchar", "int128 to varchar", "numeric(38) to varchar"]);
     }
 
     private sealed record ServerInfo(string? Time, string? EngineVersion, string? User, bool? Compressed);
 
+    private const string ServerInfoSql =
+        "select localtimestamp, rdb$get_context('SYSTEM', 'ENGINE_VERSION'), current_user";
+
+    // WIRE_COMPRESSED is there from Firebird 3.0.4; an older server refuses the name, and is asked without it.
     private static ServerInfo ReadServerInfo(FbConnection connection, FbTransaction transaction)
     {
-        using var command = new FbCommand(
-            "select localtimestamp, rdb$get_context('SYSTEM', 'ENGINE_VERSION'), current_user from rdb$database",
-            connection,
-            transaction);
+        try
+        {
+            return ReadServerInfo(connection, transaction, ServerInfoSql + ", rdb$get_context('SYSTEM', 'WIRE_COMPRESSED') from rdb$database");
+        }
+        catch (FbException)
+        {
+            return ReadServerInfo(connection, transaction, ServerInfoSql + " from rdb$database");
+        }
+    }
+
+    private static ServerInfo ReadServerInfo(FbConnection connection, FbTransaction transaction, string sql)
+    {
+        using var command = new FbCommand(sql, connection, transaction);
         using var reader = command.ExecuteReader();
         if (!reader.Read())
         {
             return new ServerInfo(null, null, null, null);
         }
 
+        bool? compressed = reader.FieldCount > 3 && reader.GetValue(3) is string text
+            ? text.Trim().Equals("TRUE", StringComparison.OrdinalIgnoreCase)
+            : null;
         return new ServerInfo(
             ValueFormatter.Format(reader.GetValue(0), "TIMESTAMP", null),
             ValueFormatter.Format(reader.GetValue(1), "VARCHAR", null),
             ValueFormatter.Format(reader.GetValue(2), "VARCHAR", null),
-            ReadCompressed(connection, transaction));
-    }
-
-    // Firebird 4+; null where the server does not tell.
-    private static bool? ReadCompressed(FbConnection connection, FbTransaction transaction)
-    {
-        try
-        {
-            using var command = new FbCommand(
-                "select MON$WIRE_COMPRESSED from MON$ATTACHMENTS where MON$ATTACHMENT_ID = current_connection",
-                connection,
-                transaction);
-            return command.ExecuteScalar() switch
-            {
-                bool b => b,
-                string s => s.Trim().Equals("TRUE", StringComparison.OrdinalIgnoreCase),
-                _ => null,
-            };
-        }
-        catch (FbException)
-        {
-            return null;
-        }
+            compressed);
     }
 
     private static void WriteMeta(
