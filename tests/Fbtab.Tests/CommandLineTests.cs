@@ -47,7 +47,12 @@ public class CommandLineTests
         Assert.Equal(["a.sql", "b.sql"], o.Files);
         Assert.False(o.Managed);
         Assert.False(o.Compress);
+        Assert.False(o.AllowDml);
     }
+
+    [Fact]
+    public void ParsesAllowDml() =>
+        Assert.True(Options.Parse(["--db", "h:a", "--user", "U", "--allow-dml", "a.sql"], NoEnv).AllowDml);
 
     [Fact]
     public void CompressGoesIntoTheManagedConnectionString()

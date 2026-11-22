@@ -22,7 +22,9 @@ fbtab writes a file those tools read as it is.
 
 - **Read only.** Each sql file runs on its own connection in a `READ ONLY` transaction that is rolled
   back at the end. Only `SELECT`, `WITH`, `EXECUTE BLOCK` and `EXECUTE PROCEDURE` are accepted; a file
-  with anything else is refused before fbtab connects.
+  with anything else is refused before fbtab connects. With `--allow-dml` also `INSERT`, `UPDATE`,
+  `DELETE` and `MERGE`, which a read-only transaction lets change temporary tables only (see
+  "Temporary tables").
 - **Scripts written for isql run as they are.** `SET TERM` is understood; `SET LIST`, `SET COUNT`,
   `SET HEADING` and other display settings are ignored.
 - **All queries of a file are prepared before the first one runs**, so a typo in the last query
@@ -54,6 +56,7 @@ fbtab --db <database> --user <user> [options] <file.sql> [<file.sql> ...]
                          then the one next to fbtab, then the one the system finds)
   --managed              connect without fbclient
   --compress             compress the connection (see "Slow links")
+  --allow-dml            also run INSERT, UPDATE, DELETE and MERGE (see "Temporary tables")
   --isolation <mode>     read-committed (default) or snapshot
   --out <dir>            where to write (default: current directory)
   --version, --help
@@ -111,10 +114,32 @@ select ...;
 select ...;
 ```
 
+### Temporary tables
+
+To join the data with a list from outside (codes from a spreadsheet, a statement from a bank), load the
+list into a global temporary table first. With `--allow-dml` the file can do it with plain statements:
+
+```sql
+delete from LIST;
+insert into LIST (ID) values (101);
+insert into LIST (ID) values (102);
+select c.* from CLIENTS c join LIST l on l.ID = c.ID;
+```
+
+The transaction is still `READ ONLY`, so the server refuses the same statements on any ordinary table
+(`attempted update during read-only transaction`), inside procedures and `EXECUTE BLOCK` too: only
+temporary tables can change. Their rows go when the file's connection closes. The user needs the
+right to write to the temporary table. INSERT, UPDATE, DELETE and MERGE give no file (a `RETURNING`
+is ignored) and are not prepared in advance, unlike the queries: a list can be thousands of inserts,
+and over a distant link every prepare is a round trip. An `EXECUTE BLOCK` without `RETURNS` writes to
+temporary tables without `--allow-dml`.
+
 ## Output
 
 For `report.sql` fbtab writes `report.tsv` and `report.meta.json`. A second and third query in the
-same file give `report_2.tsv`, `report_3.tsv`, each with its own `.meta.json`.
+same file give `report_2.tsv`, `report_3.tsv`, each with its own `.meta.json`. Only statements that
+return rows are counted: an INSERT or an `EXECUTE BLOCK` without `RETURNS` gives no file and takes no
+number.
 
 ### The tsv
 
@@ -189,8 +214,10 @@ length, scale and whether it can be NULL.
 2. Statements are checked by their first words before anything is sent, so a script with `UPDATE` or
    `COMMIT` in it does not get as far as a connection.
 
-One thing a read-only transaction still allows is writing to global temporary tables declared
-`ON COMMIT DELETE ROWS`; such rows live until the end of the transaction, which fbtab rolls back.
+One thing a read-only transaction still allows is writing to global temporary tables (both
+`ON COMMIT DELETE ROWS` and `ON COMMIT PRESERVE ROWS`); such rows live at most until the file's
+connection closes. Plain `INSERT`, `UPDATE`, `DELETE` and `MERGE` statements are refused by the check of
+point 2 unless `--allow-dml` is given; with it, point 1 still keeps them off ordinary tables.
 
 ## Limits
 
